@@ -1,0 +1,108 @@
+# Loading of necessary libraries
+library(DESeq2)
+library(BiocParallel)
+library(writexl)
+library(ggplot2)
+library(scales)
+library(viridis)
+library(RColorBrewer)
+library(reshape2)
+library(ggdendro)
+library(gridExtra)
+library(gtable)
+library(grid)
+library(tibble)
+library(pheatmap)
+library(dplyr)
+library(tidyr)
+library(ComplexHeatmap)
+library(patchwork)
+library(ggrepel)
+
+# Registration of parameters for processing
+register(SnowParam(4))
+
+# Data loading
+rawCounts <- read.csv("Counts.csv", sep =",", header = TRUE, stringsAsFactors = FALSE)
+sampleData <- read.csv("Metadata.csv", sep = ",", header = TRUE)
+
+# Data processing
+sampleData$id <- gsub('-', '.', sampleData$id)
+write_xlsx(sampleData, "Dataprocessed.xlsx")
+
+miRNA <- rawCounts$miRNA
+sampleIndex <- grepl("MIL", colnames(rawCounts))
+rawCounts <- as.matrix(rawCounts[,sampleIndex])
+rownames(rawCounts) <- miRNA
+
+row.names(sampleData) <- sampleData$id
+keep <- c("dex", "geo_id")
+sampleData <- sampleData[,keep]
+sampleData$geo_id <- factor(sampleData$geo_id)
+
+rawCounts <- rawCounts[,unique(rownames(sampleData))]
+stopifnot(all(colnames(rawCounts) == rownames(sampleData)))
+
+sampleData$dex <- factor(sampleData$dex, levels=c("low ACE", "high ACE"))
+
+keep <- rowSums(rawCounts) >= 20
+rawCounts <- rawCounts[keep,]
+rawCounts <- na.omit(rawCounts)
+
+# Creating a DESeq2 object
+deseq2Data <- DESeqDataSetFromMatrix(countData = rawCounts, colData = sampleData, design = ~dex)
+deseq2Data <- DESeq(deseq2Data)
+vst <- varianceStabilizingTransformation(deseq2Data, blind = FALSE)
+
+# DESeq2 results
+deseq2Results <- results(deseq2Data, contrast=c("dex", "high ACE", "low ACE"))
+summary(deseq2Results)
+
+# MA graph
+plotMA(deseq2Results)
+
+# PCA
+plot_data <- plotPCA(vst, intgroup="dex", returnData=TRUE)
+plot_data <- bind_cols(plot_data, sampleData)
+colourPallette <- c("#89a3d2","#ff9c70","#f2f3f4")
+
+ggplot(plot_data, aes(x = PC1, y = PC2, col = dex)) + 
+  geom_point(size=4) + 
+  scale_color_manual(values = colourPallette_2) +
+  theme_minimal(base_family = "Arial") + 
+  labs(x = "PC1", y = "PC2", color = "Groups")
+
+# Heatmap 
+miRNAdata_scaled <- as.data.frame(t(assay(vst)))
+miRNAdata_scaled$Gene <- rownames(miRNAdata_scaled)
+miRNAdata_scaled <- pivot_longer(miRNAdata_scaled, cols = -Gene, names_to = "variable", values_to = "value")
+
+heatmap_plot <- ggplot(data = miRNAdata_scaled, aes(x = variable, y = Gene)) +
+  geom_tile(aes(fill = value), colour = "white") + 
+  facet_grid(~dex, scales = "free") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, space = "Lab", guide = "colourbar", aesthetics = "fill") +
+  labs(title = "ACE", x = "Variable", y = "miRNA", fill = "Value") +
+  theme_minimal(base_family = "Arial") +
+  theme(axis.text.x = element_blank(), axis.text.y = element_text(size = 12), text = element_text(family = "Arial"))
+
+print(heatmap_plot)
+
+# Volcano plot
+volcano_data <- deseq2ResDF
+volcano_data$diffexpressed <- "NO"
+volcano_data$diffexpressed[volcano_data$log2FoldChange > 1.0 & volcano_data$pvalue < 0.002] <- "UP"
+volcano_data$diffexpressed[volcano_data$log2FoldChange < -1.0 & volcano_data$pvalue < 0.002] <- "DOWN"
+
+volcano_plot <- ggplot(data=volcano_data, aes(x=log2FoldChange, y=-log10(pvalue), col=diffexpressed)) +
+  geom_point() + 
+  geom_vline(xintercept=c(-1.0, 1.0), col="gray", linetype='dashed') +
+  geom_hline(yintercept=-log10(0.0002), col="gray", linetype='dashed') +
+  geom_text_repel(max.overlaps = Inf, aes(label=delabel)) +
+  scale_color_manual(values=c("gray", "#00AFBB", "#FFDB6D")) + 
+  scale_x_continuous(breaks=seq(-10, 10, 2)) +
+  coord_cartesian(ylim=c(0, 5.5), xlim=c(-5, 5)) +
+  labs(color='Significance', x=expression("log"[2]*"FC"), y=expression("-log"[10]*"p-value")) + 
+  ggtitle('Title') +
+  theme_minimal(base_family="Arial")
+
+print(volcano_plot)
